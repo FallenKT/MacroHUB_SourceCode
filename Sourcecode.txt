@@ -1,0 +1,498 @@
+#SingleInstance Force
+
+; ============================================================
+;             MacroHub — Open Source (Full Features)
+;        All macro features kept, all sensitive data removed
+;        No game names, no commands, no authentication
+; ============================================================
+
+
+; ============================================================
+;                 GENERIC COMMAND SENDER
+; ============================================================
+SendCommand(cmd) {
+    ; This function replaces any game-specific logic.
+    ; Users can define whatever command they want here.
+
+    if !IsSet(cmd) || cmd = ""
+        return
+
+    ; Example generic implementation:
+    Send "{Enter}"
+    Sleep 150
+    Send cmd
+    Sleep 150
+    Send "{Enter}"
+}
+
+
+; ============================================================
+;                    MAIN MACRO CLASS
+; ============================================================
+class MacroHub {
+
+    __New() {
+        ; Runtime state
+        this.isRunning       := false
+        this.spaceRunning    := false
+        this.movingLeft      := true
+        this.holdTimeSec     := 32
+        this.elapsedMs       := 0
+
+        ; Auto-cycle/warp system (generic)
+        this.autoWarpEnabled := false
+        this.warpInterval    := 15     ; minutes
+        this.warpLast        := A_TickCount
+
+        ; GUI sizing
+        this.FullW      := 750
+        this.FullH      := 560
+        this.CompactH   := 300
+        this.viewMode   := 1
+
+        ; position
+        this.overlayX   := A_ScreenWidth - this.FullW - 20
+        this.overlayY   := 20
+
+        this.hotControls := []
+        this.moveTimer   := ObjBindMethod(this, "MoveTick")
+        this.warpTimer   := ObjBindMethod(this, "AutoWarpTick")
+
+        this.BuildGUI()
+        this.BindHotkeys()
+        this.ShowOverlay()
+
+        SetTimer(this.warpTimer, 1000)
+    }
+
+    ; ============================================================
+    ;                      GUI CONSTRUCTION
+    ; ============================================================
+    BuildGUI() {
+        this.gui := Gui("+AlwaysOnTop -Caption +ToolWindow")
+        this.gui.BackColor := "111217"
+        this.gui.SetFont("s10 cFFFFFF", "Segoe UI")
+
+        sideW := 160
+        mainW := this.FullW - sideW
+
+        ; Sidebar
+        this.gui.AddText("x0 y0 w" sideW " h" this.FullH " Background09090C")
+        this.gui.SetFont("s14 Bold cFF4040")
+        this.gui.AddText("x18 y14 BackgroundTrans", "MacroHub")
+
+        this.gui.SetFont("s9 c777777")
+        this.gui.AddText("x18 y38 BackgroundTrans", "Open-Source Edition")
+
+        this.gui.SetFont("s9 cFFFFFF")
+        btnMacro := this.gui.AddButton("x14 y100 w132 h24 Background111217 -Border", "🏃  Macro")
+        btnWarp :=  this.gui.AddButton("x14 y130 w132 h24 Background111217 -Border", "🧭  Auto-Warp")
+        btnSafe :=  this.gui.AddButton("x14 y160 w132 h24 Background111217 -Border", "🛡  Safety")
+        btnOverlay := this.gui.AddButton("x14 y190 w132 h24 Background111217 -Border", "🖥  Overlay")
+        btnAbout :=   this.gui.AddButton("x14 y220 w132 h24 Background111217 -Border", "ℹ  About")
+
+        btnMacro.OnEvent("Click", (*) => this.ShowTab("Macro"))
+        btnWarp.OnEvent("Click",  (*) => this.ShowTab("AutoWarp"))
+        btnSafe.OnEvent("Click",  (*) => this.ShowTab("Safety"))
+        btnOverlay.OnEvent("Click",(*) => this.ShowTab("Overlay"))
+        btnAbout.OnEvent("Click", (*) => this.ShowTab("About"))
+
+        this.sidebarButtons := Map(
+            "Macro", btnMacro,
+            "AutoWarp", btnWarp,
+            "Safety", btnSafe,
+            "Overlay", btnOverlay,
+            "About", btnAbout
+        )
+
+        ; Header
+        this.gui.AddText("x" sideW " y0 w" mainW " h44 Background16171E")
+        this.gui.SetFont("s12 Bold cFFFFFF")
+        this.gui.AddText("x" (sideW + 18) " y10 BackgroundTrans", "Macro Control")
+
+        this.gui.SetFont("s8 c777777")
+        this.headerRight := this.gui.AddText("x" (sideW + mainW - 120) " y26 w110 +Right", "Ready")
+
+        this.gui.AddProgress("x" sideW " y42 w" mainW " h2 cFF3333")
+
+        ; Status Card
+        statusW := 420
+        statusX := sideW + (mainW - statusW) / 2
+        statusY := 70
+
+        this.gui.AddText("x" statusX " y" statusY " w" statusW " h140 Background20212A")
+        this.gui.AddText("x" (statusX+10) " y" (statusY+10) " w" (statusW-20) " h120 Background1E1F28")
+
+        this.gui.SetFont("s10 cFFFFFF")
+        y := statusY + 6
+        this.txtMove := this.gui.AddText("x" statusX " y" y " w" statusW " +Center BackgroundTrans", "Movement: Idle"), y+=18
+        this.txtAuto := this.gui.AddText("x" statusX " y" y " w" statusW " +Center BackgroundTrans", "Auto-Stop: Disabled"), y+=18
+        this.txtSpace := this.gui.AddText("x" statusX " y" y " w" statusW " +Center", "Space: OFF"), y+=18
+        this.txtHold := this.gui.AddText("x" statusX " y" y " w" statusW " +Center", "Hold Time: 32s"), y+=18
+        this.txtFlip := this.gui.AddText("x" statusX " y" y " w" statusW " +Center", "Next Switch: —.—s"), y+=18
+        this.txtWarpTimer := this.gui.AddText("x" statusX " y" y " w" statusW " +Center", "Auto-Warp: OFF"), y+=18
+        this.txtWarp := this.gui.AddText("x" statusX " y" y " w" statusW " +Center", "Warp: Ready")
+
+        ; Tabs
+        this.tabControls := Map()
+        this.CreateMacroTab(sideW, mainW)
+        this.CreateAutoWarpTab(sideW, mainW)
+        this.CreateSafetyTab(sideW, mainW)
+        this.CreateOverlayTab(sideW, mainW)
+        this.CreateAboutTab(sideW, mainW)
+        this.ShowTab("Macro")
+    }
+
+    ; ============================================================
+    ;                      TAB HELPERS
+    ; ============================================================
+    AddRow(cardX, cardW, y, label, key) {
+        lbl := this.gui.AddText("x" (cardX+16) " y" y " w" (cardW-100) " cC8C8C8 BackgroundTrans", label)
+        keyBox := this.gui.AddText("x" (cardX + cardW - 56) " y" y " w40 h18 +Center Background2A2A2A cFFFFFF Border", key)
+        return [lbl, keyBox]
+    }
+
+    CreateMacroTab(sideW, mainW) {
+        arr := []
+        cardX := sideW+30, cardY := 230, cardW := mainW-60, cardH := this.FullH-260
+
+        outer := this.gui.AddText("x" cardX " y" cardY " w" cardW " h" cardH " Background20212A")
+        inner := this.gui.AddText("x" (cardX+10) " y" (cardY+10) " w" (cardW-20) " h" (cardH-20) " Background1C1D26")
+
+        arr.Push(outer), arr.Push(inner)
+
+        this.gui.SetFont("s10 cFFFFFF")
+        arr.Push(this.gui.AddText("x" (cardX+14) " y" (cardY+12) " BackgroundTrans", "Macro"))
+        this.gui.AddProgress("x" (cardX+14) " y" (cardY+30) " w100 h2 cFF3333")
+
+        y := cardY+50
+        this.gui.SetFont("s9 cFFFFFF")
+        arr.Push(this.gui.AddText("x" (cardX+14) " y" y " BackgroundTrans", "Movement Controls"))
+
+        y+=28
+        for row in [
+            this.AddRow(cardX,cardW,y,"Hold Space","F3"),
+            this.AddRow(cardX,cardW,y+22,"Stop Space","F4"),
+            this.AddRow(cardX,cardW,y+44,"Start Movement","F6"),
+            this.AddRow(cardX,cardW,y+66,"Stop Movement","F7"),
+            this.AddRow(cardX,cardW,y+88,"Increase A/D Hold","K"),
+            this.AddRow(cardX,cardW,y+110,"Decrease A/D Hold","L")
+        ]
+            for c in row arr.Push(c)
+
+        this.tabControls["Macro"] := arr
+    }
+
+    CreateAutoWarpTab(sideW, mainW) {
+        arr := []
+        cardX := sideW+30, cardY := 230, cardW := mainW-60, cardH := this.FullH-260
+
+        arr.Push(this.gui.AddText("x" cardX " y" cardY " w" cardW " h" cardH " Background20212A"))
+        arr.Push(this.gui.AddText("x" (cardX+10) " y" (cardY+10) " w" (cardW-20) " h" (cardH-20) " Background1C1D26"))
+
+        this.gui.SetFont("s10 Bold cFFFFFF")
+        arr.Push(this.gui.AddText("x" (cardX+14) " y" (cardY+12), "Auto-Warp"))
+        this.gui.AddProgress("x" (cardX+14) " y" (cardY+30) " w100 h2 cFF3333")
+
+        y := cardY+50
+        for row in [
+            this.AddRow(cardX,cardW,y,"Trigger Custom Warp","F"), 
+            this.AddRow(cardX,cardW,y+22,"Enable Auto-Warp","O"),
+            this.AddRow(cardX,cardW,y+44,"Disable Auto-Warp","I"),
+            this.AddRow(cardX,cardW,y+66,"Increase Warp Interval","PgUp"),
+            this.AddRow(cardX,cardW,y+88,"Decrease Warp Interval","PgDn")
+        ]
+            for c in row arr.Push(c)
+
+        this.tabControls["AutoWarp"] := arr
+    }
+
+    CreateSafetyTab(sideW, mainW) {
+        arr := []
+        cardX := sideW+30, cardY := 230, cardW := mainW-60, cardH := this.FullH-260
+
+        arr.Push(this.gui.AddText("x" cardX " y" cardY " w" cardW " h" cardH " Background20212A"))
+        arr.Push(this.gui.AddText("x" (cardX+10) " y" (cardY+10) " w" (cardW-20) " h" (cardH-20) " Background1C1D26"))
+
+        this.gui.SetFont("s10 Bold cFFFFFF")
+        arr.Push(this.gui.AddText("x" (cardX+14) " y" (cardY+12), "Safety"))
+        this.gui.AddProgress("x" (cardX+14) " y" (cardY+30) " w80 h2 cFF3333")
+
+        y := cardY+50
+        for row in [
+            this.AddRow(cardX,cardW,y,"Enable Auto-Stop","F8"),
+            this.AddRow(cardX,cardW,y+22,"Disable Auto-Stop","F9"),
+            this.AddRow(cardX,cardW,y+44,"Panic Stop","F5")
+        ]
+            for c in row arr.Push(c)
+
+        this.tabControls["Safety"] := arr
+    }
+
+    CreateOverlayTab(sideW, mainW) {
+        arr := []
+        cardX := sideW+30, cardY := 230, cardW := mainW-60, cardH := this.FullH-260
+
+        arr.Push(this.gui.AddText("x" cardX " y" cardY " w" cardW " h" cardH " Background20212A"))
+        arr.Push(this.gui.AddText("x" (cardX+10) " y" (cardY+10) " w" (cardW-20) " h" (cardH-20) " Background1C1D26"))
+
+        this.gui.SetFont("s10 Bold cFFFFFF")
+        arr.Push(this.gui.AddText("x" (cardX+14) " y" (cardY+12), "Overlay"))
+        this.gui.AddProgress("x" (cardX+14) " y" (cardY+30) " w80 h2 cFF3333")
+
+        y := cardY+50
+        for row in [
+            this.AddRow(cardX,cardW,y,"Toggle Overlay","Insert"),
+            this.AddRow(cardX,cardW,y+22,"Toggle View Mode","M")
+        ]
+            for c in row arr.Push(c)
+
+        this.tabControls["Overlay"] := arr
+    }
+
+    CreateAboutTab(sideW, mainW) {
+        arr := []
+        cardX := sideW+30, cardY := 230, cardW := mainW-60, cardH := this.FullH-260
+
+        arr.Push(this.gui.AddText("x" cardX " y" cardY " w" cardW " h" cardH " Background20212A"))
+        arr.Push(this.gui.AddText("x" (cardX+10) " y" (cardY+10) " w" (cardW-20) " h" (cardH-20) " Background1C1D26"))
+
+        this.gui.SetFont("s10 Bold cFFFFFF")
+        arr.Push(this.gui.AddText("x" (cardX+14) " y" (cardY+12), "About"))
+        this.gui.AddProgress("x" (cardX+14) " y" (cardY+30) " w80 h2 cFF3333")
+
+        this.gui.SetFont("s9 cDDDDDD")
+        arr.Push(this.gui.AddText("x" (cardX+14) " y" (cardY+52) " w" (cardW-40), 
+            "MacroHub Open-Source (Full Features)`n"
+            "All macro functions remain intact.`n"
+            "No sensitive data, no game commands, no backend.`n`n"
+            "You may modify this version to fit your own commands."
+        ))
+
+        this.tabControls["About"] := arr
+    }
+
+    ; ============================================================
+    ;                    TAB SWITCHER
+    ; ============================================================
+    ShowTab(name) {
+        for tab, list in this.tabControls
+            for ctrl in list
+                ctrl.Visible := (tab = name)
+
+        for tab, btn in this.sidebarButtons {
+            if (tab = name)
+                btn.SetFont("s9 cFF4040 Bold")
+            else
+                btn.SetFont("s9 cFFFFFF")
+        }
+    }
+
+    ; ============================================================
+    ;                   HOTKEYS
+    ; ============================================================
+    BindHotkeys() {
+        Hotkey("F3", (*) => this.HoldSpace(true))
+        Hotkey("F4", (*) => this.HoldSpace(false))
+        Hotkey("F6", (*) => this.StartMove())
+        Hotkey("F7", (*) => this.StopMove())
+        Hotkey("F8", (*) => this.AutoStop(true))
+        Hotkey("F9", (*) => this.AutoStop(false))
+        Hotkey("K", (*) => this.ChangeHoldTime(1))
+        Hotkey("L", (*) => this.ChangeHoldTime(-1))
+        Hotkey("F", (*) => this.Warp())
+        Hotkey("F5", (*) => this.PanicStop())
+        Hotkey("Insert", (*) => this.ToggleOverlay())
+        Hotkey("M", (*) => this.ToggleViewMode())
+
+        Hotkey("^Up", (*) => this.MoveOverlay(0,-5))
+        Hotkey("^Down",(*) => this.MoveOverlay(0, 5))
+        Hotkey("^Left",(*) => this.MoveOverlay(-5,0))
+        Hotkey("^Right",(*) => this.MoveOverlay(5, 0))
+
+        Hotkey("O", (*)=>this.EnableAutoWarp())
+        Hotkey("I", (*)=>this.DisableAutoWarp())
+        Hotkey("PgUp", (*)=>this.ChangeWarpTime(1))
+        Hotkey("PgDn", (*)=>this.ChangeWarpTime(-1))
+    }
+
+    ; ============================================================
+    ;                 OVERLAY CONTROL
+    ; ============================================================
+    ShowOverlay() => this.gui.Show("x" this.overlayX " y" this.overlayY " w" this.FullW " h" this.FullH)
+
+    ToggleOverlay() {
+        hwnd := this.gui.Hwnd
+        if WinExist("ahk_id " hwnd)
+            this.gui.Hide()
+        else
+            this.gui.Show()
+    }
+
+    MoveOverlay(dx,dy){
+        this.overlayX += dx
+        this.overlayY += dy
+        this.gui.Move(this.overlayX,this.overlayY)
+    }
+
+    ToggleViewMode() {
+        this.viewMode := this.viewMode=1 ? 2:1
+        targetH := this.viewMode=1 ? this.FullH : this.CompactH
+        this.gui.Move(,,,targetH)
+    }
+
+    ; ============================================================
+    ;                MOVEMENT & SPACE SYSTEM
+    ; ============================================================
+    HoldSpace(on) {
+        this.spaceRunning := on
+        SendInput(on ? "{Space down}" : "{Space up}")
+        this.txtSpace.Value := "Space: " (on ? "ON" : "OFF")
+    }
+
+    StartMove(){
+        if this.isRunning
+            return
+        this.isRunning := true
+        this.movingLeft := true
+        this.elapsedMs := 0
+        SendInput("{w down}{a down}")
+        this.txtMove.Value := "Movement: ON (A)"
+        SetTimer(this.moveTimer, 200)
+    }
+
+    StopMove(){
+        this.isRunning := false
+        SetTimer(this.moveTimer, 0)
+        SendInput("{w up}{a up}{d up}")
+        this.txtMove.Value := "Movement: OFF"
+        this.txtFlip.Value := "Next Switch: —.—s"
+    }
+
+    ChangeHoldTime(d){
+        this.holdTimeSec := Max(1, this.holdTimeSec + d)
+        this.txtHold.Value := "Hold Time: " this.holdTimeSec "s"
+    }
+
+    MoveTick(){
+        if !this.isRunning
+            return
+
+        this.elapsedMs += 200
+        rem := this.holdTimeSec - this.elapsedMs/1000
+        if rem < 0
+            rem := 0
+        this.txtFlip.Value := Format("Next Switch: {1:.1f}s", rem)
+
+        if this.elapsedMs >= this.holdTimeSec*1000 {
+            this.elapsedMs := 0
+            if this.movingLeft {
+                SendInput("{a up}{d down}")
+                this.movingLeft := false
+                this.txtMove.Value := "Movement: ON (D)"
+            } else {
+                SendInput("{d up}{a down}")
+                this.movingLeft := true
+                this.txtMove.Value := "Movement: ON (A)"
+            }
+        }
+    }
+
+    AutoStop(on){
+        this.autoStopEnabled := on
+        this.txtAuto.Value := "Auto-Stop: " (on ? "Enabled" : "Disabled")
+    }
+
+    PanicStop(){
+        this.isRunning := false
+        this.spaceRunning := false
+        SetTimer(this.moveTimer,0)
+        SendInput("{w up}{a up}{d up}{Space up}")
+        this.txtMove.Value := "Movement: PANIC STOP"
+        this.txtSpace.Value := "Space: OFF"
+    }
+
+    ; ============================================================
+    ;                AUTO-WARP / AUTO-CYCLE SYSTEM
+    ; ============================================================
+    Warp(){
+        ; User-defined warp placeholder
+        SendCommand("/your-warp-command")
+        this.txtWarp.Value := "Warp: Executed"
+    }
+
+    EnableAutoWarp(){
+        this.autoWarpEnabled := true
+        this.warpLast := A_TickCount
+        this.txtWarpTimer.Value := Format("Auto-Warp in: {1}m 00s", this.warpInterval)
+    }
+
+    DisableAutoWarp(){
+        this.autoWarpEnabled := false
+        this.txtWarpTimer.Value := "Auto-Warp: OFF"
+    }
+
+    ChangeWarpTime(d){
+        this.warpInterval := Max(1, Min(120, this.warpInterval + d))
+        if this.autoWarpEnabled
+            this.txtWarpTimer.Value := Format("Auto-Warp in: {1}m 00s", this.warpInterval)
+        else
+            this.txtWarpTimer.Value := "Auto-Warp: OFF"
+    }
+
+    AutoWarpTick(){
+        if !this.autoWarpEnabled
+            return
+
+        elapsed := (A_TickCount - this.warpLast)/1000
+        total := this.warpInterval * 60
+        remain := total - elapsed
+        if remain < 0
+            remain := 0
+
+        mins := Floor(remain/60)
+        secs := Mod(Round(remain),60)
+
+        this.txtWarpTimer.Value := Format("Auto-Warp in: {1}m {2:02}s", mins, secs)
+
+        if remain <= 0
+            this.DoAutoWarp()
+    }
+
+    DoAutoWarp(){
+        this.warpLast := A_TickCount
+
+        ; Save current states
+        wasRun := this.isRunning
+        wasLeft := this.movingLeft
+        wasSpace := this.spaceRunning
+
+        ; Stop
+        SendInput("{w up}{a up}{d up}{Space up}")
+
+        ; Placeholder auto-warp
+        SendCommand("/your-auto-warp-command")
+
+        Sleep 1000
+
+        ; Restore movement
+        if wasRun {
+            SendInput("{w down}")
+            if wasLeft
+                SendInput("{a down}")
+            else
+                SendInput("{d down}")
+        }
+        if wasSpace
+            SendInput("{Space down}")
+
+        this.txtWarp.Value := "Warp: Ready"
+        this.warpLast := A_TickCount
+    }
+}
+
+; ============================================================
+;                         ENTRY POINT
+; ============================================================
+MacroHub()
+return
